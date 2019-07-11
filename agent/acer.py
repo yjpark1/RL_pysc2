@@ -4,10 +4,11 @@ import copy
 from torch.nn.functional import gumbel_softmax
 from utils import arglist
 from agent.agent import Agent
+from networks.acnetworks_newchallenge import FullyConvNet
 
 
 class AcerAgent(Agent):
-    def __init__(self, actor, critic, memory):
+    def __init__(self, ActorCritic, memory):
         """
         Acer learning for seperated actor & critic networks.
         """
@@ -15,25 +16,17 @@ class AcerAgent(Agent):
         self.nb_actions = arglist.NUM_ACTIONS
 
         self.iter = 0
-        self.actor = actor.to(self.device)
-        self.target_actor = copy.deepcopy(actor).to(self.device)
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), arglist.DDPG.LEARNINGRATE)
-
-        self.critic = critic.to(self.device)
-        self.target_critic = copy.deepcopy(critic).to(self.device)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), arglist.DDPG.LEARNINGRATE)
+        self.ActorCritic = ActorCritic.to(self.device)
+        self.actor_optimizer = torch.optim.Adam(self.ActorCritic.parameters(), arglist.ACER.LEARNINGRATE)
 
         self.memory = memory
-
-        self.target_actor.eval()
-        self.target_critic.eval()
 
     def process_batch(self):
         """
         Transforms numpy replays to torch tensor
         :return: dict of torch.tensor
         """
-        replays = self.memory.sample(arglist.DDPG.BatchSize)
+        replays = self.memory.sample(arglist.ACER.BatchSize)
 
         # initialize batch experience
         batch = {'state0': {'minimap': [], 'screen': [], 'nonspatial': []},
@@ -71,7 +64,8 @@ class AcerAgent(Agent):
 
         return batch['state0'], batch['action'], batch['reward'], batch['state1'], batch['terminal1']
 
-    def gumbel_softmax_hard(self, x):
+    @staticmethod
+    def gumbel_softmax_hard(x):
         shape = x.shape
         if len(shape) == 4:
             # merge batch and seq dimensions
@@ -88,15 +82,17 @@ class AcerAgent(Agent):
         """
         Conduct a single discrete learning iteration. Analogue of Algorithm 2 in the paper.
         """
-        actor_critic = DiscreteActorCritic()
-        actor_critic.copy_parameters_from(self.brain.actor_critic)
+        ActorCritic = FullyConvNet()
+        ActorCritic.copy_parameters_from(self.ActorCritic)
+
+        trajectory = self.process_batch()
 
         _, _, _, next_states, _, _ = trajectory[-1]
-        action_probabilities, action_values = actor_critic(Variable(next_states))
+        action_probabilities, action_values = ActorCritic(next_states)
         retrace_action_value = (action_probabilities * action_values).data.sum(-1).unsqueeze(-1)
 
         for states, actions, rewards, _, done, exploration_probabilities in reversed(trajectory):
-            action_probabilities, action_values = actor_critic(Variable(states))
+            action_probabilities, action_values = ActorCritic(Variable(states))
             average_action_probabilities, _ = self.brain.average_actor_critic(Variable(states))
             value = (action_probabilities * action_values).data.sum(-1).unsqueeze(-1) * (1. - done)
             action_indices = Variable(actions.long())
@@ -104,15 +100,15 @@ class AcerAgent(Agent):
             importance_weights = action_probabilities.data / exploration_probabilities
 
             naive_advantage = action_values.gather(-1, action_indices).data - value
-            retrace_action_value = rewards + DISCOUNT_FACTOR * retrace_action_value * (1. - done)
+            retrace_action_value = rewards + arglist.ACER.DISCOUNT_FACTOR * retrace_action_value * (1. - done)
             retrace_advantage = retrace_action_value - value
 
             # Actor
-            actor_loss = - ACTOR_LOSS_WEIGHT * Variable(
-                importance_weights.gather(-1, action_indices.data).clamp(max=TRUNCATION_PARAMETER) * retrace_advantage) \
+            actor_loss = - arglist.ACER.ACTOR_LOSS_WEIGHT * Variable(
+                importance_weights.gather(-1, action_indices.data).clamp(max=arglist.ACER.TRUNCATION_PARAMETER) * retrace_advantage) \
                          * action_probabilities.gather(-1, action_indices).log()
-            bias_correction = - ACTOR_LOSS_WEIGHT * Variable(
-                (1 - TRUNCATION_PARAMETER / importance_weights).clamp(min=0.) *
+            bias_correction = - arglist.ACER.ACTOR_LOSS_WEIGHT * Variable(
+                (1 - arglist.ACER.TRUNCATION_PARAMETER / importance_weights).clamp(min=0.) *
                 naive_advantage * action_probabilities.data) * action_probabilities.log()
             actor_loss += bias_correction.sum(-1).unsqueeze(-1)
             actor_gradients = torch.autograd.grad(actor_loss.mean(), action_probabilities, retain_graph=True)
@@ -125,14 +121,14 @@ class AcerAgent(Agent):
             critic_loss.mean().backward(retain_graph=True)
 
             # Entropy
-            entropy_loss = ENTROPY_REGULARIZATION * (action_probabilities * action_probabilities.log()).sum(-1)
+            entropy_loss = arglist.ACER.ENTROPY_REGULARIZATION * (action_probabilities * action_probabilities.log()).sum(-1)
             entropy_loss.mean().backward(retain_graph=True)
 
             retrace_action_value = importance_weights.gather(-1, action_indices.data).clamp(max=1.) * \
                                    (retrace_action_value - action_values.gather(-1, action_indices).data) + value
-        self.brain.actor_critic.copy_gradients_from(actor_critic)
+        self.ActorCritic.copy_gradients_from(ActorCritic)
         self.optimizer.step()
-        self.brain.average_actor_critic.copy_parameters_from(self.brain.actor_critic, decay=TRUST_REGION_DECAY)
+        self.brain.average_actor_critic.copy_parameters_from(self.ActorCritic, decay=arglist.ACER.TRUST_REGION_DECAY)
 
         return loss_actor, loss_critic
 

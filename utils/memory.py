@@ -10,6 +10,7 @@ import numpy as np
 Experience = namedtuple('Experience', 'state0, action, reward, state1, terminal1')
 Trajectory = namedtuple('Trajectory', 'state, action, reward, terminal')
 EpisodicTimestep = namedtuple('EpisodicTimestep', 'observation, action, reward, terminal')
+EpisodicTimestepAcer = namedtuple('EpisodicTimestepAcer', 'observation, action, reward, terminal', 'prob')
 
 
 def sample_batch_indexes(low, high, size):
@@ -297,6 +298,95 @@ class EpisodicMemory(Memory):
         return True
 
 
+class EpisodicMemoryAcer(Memory):
+    def __init__(self, limit, **kwargs):
+        super(EpisodicMemoryAcer, self).__init__(**kwargs)
+
+        self.limit = limit
+        self.episodes = RingBuffer(limit)
+        self.terminal = False
+
+    def sample(self, batch_size, batch_idxs=None):
+        if len(self.episodes) <= 1:
+            # We don't have a complete episode yet ...
+            return []
+
+        if batch_idxs is None:
+            # Draw random indexes such that we never use the last episode yet, which is
+            # always incomplete by definition.
+            batch_idxs = sample_batch_indexes(0, self.nb_entries - 1, size=batch_size)
+        assert np.min(batch_idxs) >= 0
+        assert np.max(batch_idxs) < self.nb_entries
+        assert len(batch_idxs) == batch_size
+
+        # Create sequence of experiences.
+        sequences = []
+        for idx in batch_idxs:
+            episode = self.episodes[idx]
+            while len(episode) == 0:
+                idx = sample_batch_indexes(0, self.nb_entries, size=1)[0]
+
+            # Bootstrap state.
+            running_state = deque(maxlen=self.window_length)
+            for _ in range(self.window_length - 1):
+                running_state.append(np.zeros(episode[0].observation.shape))
+            assert len(running_state) == self.window_length - 1
+
+            states, rewards, actions, terminals = [], [], [], []
+            terminals.append(False)
+            for idx, timestep in enumerate(episode):
+                running_state.append(timestep.observation)
+                states.append(np.array(running_state))
+                rewards.append(timestep.reward)
+                actions.append(timestep.action)
+                terminals.append(timestep.terminal)  # offset by 1, see `terminals.append(False)` above
+            assert len(states) == len(rewards)
+            assert len(states) == len(actions)
+            assert len(states) == len(terminals) - 1
+
+            # Transform into experiences (to be consistent).
+            sequence = []
+            for idx in range(len(episode) - 1):
+                state0 = states[idx]
+                state1 = states[idx + 1]
+                reward = rewards[idx]
+                action = actions[idx]
+                terminal1 = terminals[idx + 1]
+                experience = Experience(state0=state0, state1=state1, reward=reward, action=action, terminal1=terminal1)
+                sequence.append(experience)
+            sequences.append(sequence)
+            assert len(sequence) == len(episode) - 1
+        assert len(sequences) == batch_size
+        return sequences
+
+    def append(self, observation, action, reward, terminal, training=True):
+        super(EpisodicMemoryAcer, self).append(observation, action, reward, terminal, training=training)
+
+        # This needs to be understood as follows: in `observation`, take `action`, obtain `reward`
+        # and weather the next state is `terminal` or not.
+        if training:
+            timestep = EpisodicTimestep(observation=observation, action=action, reward=reward, terminal=terminal)
+            if len(self.episodes) == 0:
+                self.episodes.append([])  # first episode
+            self.episodes[-1].append(timestep)
+            if self.terminal:
+                self.episodes.append([])
+            self.terminal = terminal
+
+    @property
+    def nb_entries(self):
+        return len(self.episodes)
+
+    def get_config(self):
+        config = super(EpisodicMemoryAcer, self).get_config()
+        config['limit'] = self.limit
+        return config
+
+    @property
+    def is_episodic(self):
+        return True
+
+
 class SingleEpisodeMemory(Memory):
     def __init__(self, limit, **kwargs):
         super(SingleEpisodeMemory, self).__init__(**kwargs)
@@ -360,17 +450,17 @@ class SingleEpisodeMemory(Memory):
 
 
 if __name__ == '__main__':
-    action_shape = {'categorical': (10,),
-                    'screen1': (1, 32, 32),
-                    'screen2': (1, 32, 32)}
-    observation_shape = {'minimap': (7, 32, 32),
-                         'screen': (17, 32, 32),
-                         'nonspatial': (10,)}
+    action_shape = {'categorical': (549,),
+                    'screen1': (1, 64, 64),
+                    'screen2': (1, 64, 64)}
+    observation_shape = {'minimap': (7, 64, 64),
+                         'screen': (17, 64, 64),
+                         'nonspatial': (549,)}
 
-    # test SequentialMemory
+    # 1) test SequentialMemory
     mem = SequentialMemory(limit=10, window_length=1)
 
-    ## insert
+    # insert
     for r in range(10):
         obs = {}
         for k, v in observation_shape.items():
@@ -382,14 +472,13 @@ if __name__ == '__main__':
 
         mem.append(obs, action, r, terminal=False, training=True)
 
-    ## sample
+    # sample
     x = mem.sample(batch_size=3)
 
-
-    # test SingleEpisodeMemory
+    # 2) test SingleEpisodeMemory
     mem = SingleEpisodeMemory(limit=10, window_length=1)
 
-    ## insert
+    # insert
     for r in range(10):
         obs = {}
         for k, v in observation_shape.items():
@@ -401,7 +490,28 @@ if __name__ == '__main__':
 
         mem.append(obs, action, r, terminal=False, training=True)
 
-    ## sample
+    # sample
     x = mem.sample()
 
+    # 2) test EpisodicMemory
+    mem = EpisodicMemory(limit=10)
 
+    # insert
+    for e in range(5):
+        for r in range(10):
+            obs = {}
+            for k, v in observation_shape.items():
+                obs[k] = np.random.uniform(size=v)
+
+            action = {}
+            for k, v in action_shape.items():
+                action[k] = np.random.uniform(size=v)
+
+            d = 1. if r is 9 else 0.
+            mem.append(obs, action, r, terminal=d, training=True)
+
+    # sample
+    x = mem.sample(2)
+    len(x)
+    x1 = x[1]
+    x1[-2].terminal1
