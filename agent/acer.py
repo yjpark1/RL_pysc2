@@ -86,11 +86,86 @@ class AcerAgent(Agent):
 
     def optimize(self):
         """
-        Samples a random batch from replay memory and performs optimization
-        :return:
+        Conduct a single discrete learning iteration. Analogue of Algorithm 2 in the paper.
         """
+        actor_critic = DiscreteActorCritic()
+        actor_critic.copy_parameters_from(self.brain.actor_critic)
+
+        _, _, _, next_states, _, _ = trajectory[-1]
+        action_probabilities, action_values = actor_critic(Variable(next_states))
+        retrace_action_value = (action_probabilities * action_values).data.sum(-1).unsqueeze(-1)
+
+        for states, actions, rewards, _, done, exploration_probabilities in reversed(trajectory):
+            action_probabilities, action_values = actor_critic(Variable(states))
+            average_action_probabilities, _ = self.brain.average_actor_critic(Variable(states))
+            value = (action_probabilities * action_values).data.sum(-1).unsqueeze(-1) * (1. - done)
+            action_indices = Variable(actions.long())
+
+            importance_weights = action_probabilities.data / exploration_probabilities
+
+            naive_advantage = action_values.gather(-1, action_indices).data - value
+            retrace_action_value = rewards + DISCOUNT_FACTOR * retrace_action_value * (1. - done)
+            retrace_advantage = retrace_action_value - value
+
+            # Actor
+            actor_loss = - ACTOR_LOSS_WEIGHT * Variable(
+                importance_weights.gather(-1, action_indices.data).clamp(max=TRUNCATION_PARAMETER) * retrace_advantage) \
+                         * action_probabilities.gather(-1, action_indices).log()
+            bias_correction = - ACTOR_LOSS_WEIGHT * Variable(
+                (1 - TRUNCATION_PARAMETER / importance_weights).clamp(min=0.) *
+                naive_advantage * action_probabilities.data) * action_probabilities.log()
+            actor_loss += bias_correction.sum(-1).unsqueeze(-1)
+            actor_gradients = torch.autograd.grad(actor_loss.mean(), action_probabilities, retain_graph=True)
+            actor_gradients = self.discrete_trust_region_update(actor_gradients, action_probabilities,
+                                                                Variable(average_action_probabilities.data))
+            action_probabilities.backward(actor_gradients, retain_graph=True)
+
+            # Critic
+            critic_loss = (action_values.gather(-1, action_indices) - Variable(retrace_action_value)).pow(2)
+            critic_loss.mean().backward(retain_graph=True)
+
+            # Entropy
+            entropy_loss = ENTROPY_REGULARIZATION * (action_probabilities * action_probabilities.log()).sum(-1)
+            entropy_loss.mean().backward(retain_graph=True)
+
+            retrace_action_value = importance_weights.gather(-1, action_indices.data).clamp(max=1.) * \
+                                   (retrace_action_value - action_values.gather(-1, action_indices).data) + value
+        self.brain.actor_critic.copy_gradients_from(actor_critic)
+        self.optimizer.step()
+        self.brain.average_actor_critic.copy_parameters_from(self.brain.actor_critic, decay=TRUST_REGION_DECAY)
 
         return loss_actor, loss_critic
+
+    @staticmethod
+    def discrete_trust_region_update(actor_gradients, action_probabilities, average_action_probabilities):
+        """
+        Update the actor gradients so that they satisfy a linearized KL constraint with respect
+        to the average actor-critic network. See Section 3.3 of the paper for details.
+
+        Parameters
+        ----------
+        actor_gradients : tuple of torch.Tensor's
+            The original gradients.
+        action_probabilities
+            The action probabilities according to the current actor-critic network.
+        average_action_probabilities
+            The action probabilities according to the average actor-critic network.
+
+        Returns
+        -------
+        tuple of torch.Tensor's
+            The updated gradients.
+        """
+        negative_kullback_leibler = - ((average_action_probabilities.log() - action_probabilities.log())
+                                       * average_action_probabilities).sum(-1)
+        kullback_leibler_gradients = torch.autograd.grad(negative_kullback_leibler.mean(),
+                                                         action_probabilities, retain_graph=True)
+        updated_actor_gradients = []
+        for actor_gradient, kullback_leibler_gradient in zip(actor_gradients, kullback_leibler_gradients):
+            scale = actor_gradient.mul(kullback_leibler_gradient).sum(-1).unsqueeze(-1) - TRUST_REGION_CONSTRAINT
+            scale = torch.div(scale, actor_gradient.mul(actor_gradient).sum(-1).unsqueeze(-1)).clamp(min=0.)
+            updated_actor_gradients.append(actor_gradient - scale * kullback_leibler_gradient)
+        return updated_actor_gradients
 
     def soft_update(self, target, source, tau):
         """
