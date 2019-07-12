@@ -10,7 +10,7 @@ import numpy as np
 Experience = namedtuple('Experience', 'state0, action, reward, state1, terminal1')
 Trajectory = namedtuple('Trajectory', 'state, action, reward, terminal')
 EpisodicTimestep = namedtuple('EpisodicTimestep', 'observation, action, reward, terminal')
-EpisodicTimestepAcer = namedtuple('EpisodicTimestepAcer', 'observation, action, reward, terminal', 'prob')
+EpisodicTimestepAcer = namedtuple('EpisodicTimestepAcer', 'observation, action, reward, terminal, policy')
 
 
 def sample_batch_indexes(low, high, size):
@@ -446,7 +446,7 @@ class SingleEpisodeMemory(Memory):
 
     @property
     def is_episodic(self):
-        return False
+        return True
 
 
 if __name__ == '__main__':
@@ -508,10 +508,9 @@ if __name__ == '__main__':
                 action[k] = np.random.uniform(size=v)
 
             d = 1. if r is 9 else 0.
-            mem.append(obs, action, r, terminal=d, training=True)
+            mem.append(obs, action, e, terminal=d, training=True)
+
 
     # sample
     x = mem.sample(2)
-    len(x)
-    x1 = x[1]
-    x1[-2].terminal1
+    x = mem.sample(batch_size=1, batch_idxs=[mem.nb_entries-1])

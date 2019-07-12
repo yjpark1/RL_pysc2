@@ -21,12 +21,15 @@ class AcerAgent(Agent):
 
         self.memory = memory
 
-    def process_batch(self):
+    def process_batch(self, mode):
         """
         Transforms numpy replays to torch tensor
         :return: dict of torch.tensor
         """
-        replays = self.memory.sample(arglist.ACER.BatchSize)
+        if mode == 'on-policy':
+            replays = self.memory.sample(batch_size=1, batch_idxs=[self.memory.nb_entries - 1])
+        else:
+            replays = self.memory.sample(arglist.ACER.BatchSize)
 
         # initialize batch experience
         batch = {'state0': {'minimap': [], 'screen': [], 'nonspatial': []},
@@ -62,7 +65,7 @@ class AcerAgent(Agent):
                 x = torch.squeeze(x)
                 batch[key] = x.to(self.device)
 
-        return batch['state0'], batch['action'], batch['reward'], batch['state1'], batch['terminal1']
+        return batch
 
     @staticmethod
     def gumbel_softmax_hard(x):
@@ -78,15 +81,19 @@ class AcerAgent(Agent):
 
         return y
 
-    def optimize(self):
+    def optimize(self, mode):
         """
         Conduct a single discrete learning iteration. Analogue of Algorithm 2 in the paper.
         """
+        trajectory = self.process_batch(mode)
+
         ActorCritic = FullyConvNet()
         ActorCritic.copy_parameters_from(self.ActorCritic)
 
-        trajectory = self.process_batch()
+        # on-policy
+        min(, trajectory['policy'])
 
+        ###########
         _, _, _, next_states, _, _ = trajectory[-1]
         action_probabilities, action_values = ActorCritic(next_states)
         retrace_action_value = (action_probabilities * action_values).data.sum(-1).unsqueeze(-1)
@@ -158,7 +165,7 @@ class AcerAgent(Agent):
                                                          action_probabilities, retain_graph=True)
         updated_actor_gradients = []
         for actor_gradient, kullback_leibler_gradient in zip(actor_gradients, kullback_leibler_gradients):
-            scale = actor_gradient.mul(kullback_leibler_gradient).sum(-1).unsqueeze(-1) - TRUST_REGION_CONSTRAINT
+            scale = actor_gradient.mul(kullback_leibler_gradient).sum(-1).unsqueeze(-1) - arglist.ACER.TRUST_REGION_CONSTRAINT
             scale = torch.div(scale, actor_gradient.mul(actor_gradient).sum(-1).unsqueeze(-1)).clamp(min=0.)
             updated_actor_gradients.append(actor_gradient - scale * kullback_leibler_gradient)
         return updated_actor_gradients

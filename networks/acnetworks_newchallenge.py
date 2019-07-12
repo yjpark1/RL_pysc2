@@ -30,17 +30,21 @@ class FullyConvNet(torch.nn.Module):
         # state representations
         self.layer_hidden = nn.Sequential(nn.Conv2d(32 * 3, 64, 3, stride=1, padding=1),
                                           nn.ReLU())
-        # output layers
+        # output layers: policy
         self.layer_action = nn.Sequential(nn.Conv2d(64, 1, 1),
                                           nn.ReLU(),
                                           Flatten(),
                                           nn.Linear(arglist.FEAT2DSIZE * arglist.FEAT2DSIZE, arglist.NUM_ACTIONS))
         self.layer_screen1 = nn.Conv2d(64, 1, 1)
         self.layer_screen2 = nn.Conv2d(64, 1, 1)
-        self.layer_value = nn.Sequential(nn.Conv2d(64, 1, 1),
-                                         nn.ReLU(),
-                                         Flatten(),
-                                         nn.Linear(arglist.FEAT2DSIZE * arglist.FEAT2DSIZE, 1))
+
+        # output layers: policy
+        self.layer_q_action = nn.Sequential(nn.Conv2d(64, 1, 1),
+                                          nn.ReLU(),
+                                          Flatten(),
+                                          nn.Linear(arglist.FEAT2DSIZE * arglist.FEAT2DSIZE, arglist.NUM_ACTIONS))
+        self.layer_q_screen1 = nn.Conv2d(64, 1, 1)
+        self.layer_q_screen2 = nn.Conv2d(64, 1, 1)
 
         self.apply(init_weights)  # weight initialization
         self.train()  # train mode
@@ -67,9 +71,18 @@ class FullyConvNet(torch.nn.Module):
                   'screen1': pol_screen1,
                   'screen2': pol_screen2}
 
-        value = self.layer_value(state_h)
+        # Q
+        q_categorical = self.layer_q_action(state_h)
 
-        return policy, value
+        # conv. output
+        q_screen1 = self.layer_q_screen1(state_h)
+        q_screen2 = self.layer_q_screen2(state_h)
+
+        q = {'categorical': q_categorical,
+              'screen1': q_screen1,
+              'screen2': q_screen2}
+
+        return policy, q
 
     @staticmethod
     def _conv_output_shape(h_w, kernel_size=1, stride=1, pad=0, dilation=1):
