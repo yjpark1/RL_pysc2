@@ -35,9 +35,15 @@ class MiniGame:
                 # append memory
                 actions = self.preprocess.postprocess_action(actions)
                 self.learner.memory.append(obs, actions, state.reward, state.last(), training=is_training)
-                # self.learner.optimize()
+                self.learner.optimize()
 
                 if state.last():
+                    # add last time step (s, a, r, t)
+                    obs = self.preprocess.get_observation(state_new)
+                    actions = self.learner.select_action(obs, valid_actions=obs['nonspatial'])  # no meaning
+                    self.learner.memory.append(obs, actions, state_new.reward, state_new.last(),
+                                               training=is_training)
+
                     cum_reward = state.observation["score_cumulative"]
                     reward_cumulative.append(cum_reward[0])
                     break
@@ -60,6 +66,12 @@ class MiniGame:
                 self.learner.memory.append(obs, actions, state.reward, state.last(), training=is_training)
 
                 if state.last():
+                    # add last time step (s, a, r, t)
+                    obs = self.preprocess.get_observation(state_new)
+                    actions = self.learner.select_action(obs, valid_actions=obs['nonspatial'])  # no meaning
+                    self.learner.memory.append(obs, actions, state_new.reward, state_new.last(),
+                                               training=is_training)
+
                     cum_reward = state.observation["score_cumulative"]
                     reward_cumulative.append(cum_reward[0])
                     self.learner.optimize(update=True)
@@ -81,9 +93,16 @@ class MiniGame:
 
                 # append memory
                 actions = self.preprocess.postprocess_action(actions)
-                self.learner.memory.append(obs, actions, state.reward, state.last(), training=is_training)
+                self.learner.memory.append(obs, actions, state.reward, state.last(),
+                                           training=is_training)
 
                 if state.last():
+                    # add last time step (s, a, r, t)
+                    obs = self.preprocess.get_observation(state_new)
+                    actions = self.learner.select_action(obs, valid_actions=obs['nonspatial'])  # no meaning
+                    self.learner.memory.append(obs, actions, state_new.reward, state_new.last(),
+                                               training=is_training)
+
                     cum_reward = state.observation["score_cumulative"]
                     reward_cumulative.append(cum_reward[0])
                     self.learner.optimize(update=True)

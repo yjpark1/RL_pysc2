@@ -10,7 +10,7 @@ import numpy as np
 Experience = namedtuple('Experience', 'state0, action, reward, state1, terminal1')
 Trajectory = namedtuple('Trajectory', 'state, action, reward, terminal')
 EpisodicTimestep = namedtuple('EpisodicTimestep', 'observation, action, reward, terminal')
-EpisodicTimestepAcer = namedtuple('EpisodicTimestepAcer', 'observation, action, reward, terminal, policy')
+EpisodicTimestepAcer = namedtuple('EpisodicTimestepAcer', 'observation, action, reward, policy, terminal')
 
 
 def sample_batch_indexes(low, high, size):
@@ -323,55 +323,22 @@ class EpisodicMemoryAcer(Memory):
         sequences = []
         for idx in batch_idxs:
             episode = self.episodes[idx]
-            while len(episode) == 0:
-                idx = sample_batch_indexes(0, self.nb_entries, size=1)[0]
-
-            # Bootstrap state.
-            running_state = deque(maxlen=self.window_length)
-            for _ in range(self.window_length - 1):
-                running_state.append(np.zeros(episode[0].observation.shape))
-            assert len(running_state) == self.window_length - 1
-
-            states, rewards, actions, terminals = [], [], [], []
-            terminals.append(False)
-            for idx, timestep in enumerate(episode):
-                running_state.append(timestep.observation)
-                states.append(np.array(running_state))
-                rewards.append(timestep.reward)
-                actions.append(timestep.action)
-                terminals.append(timestep.terminal)  # offset by 1, see `terminals.append(False)` above
-            assert len(states) == len(rewards)
-            assert len(states) == len(actions)
-            assert len(states) == len(terminals) - 1
-
-            # Transform into experiences (to be consistent).
-            sequence = []
-            for idx in range(len(episode) - 1):
-                state0 = states[idx]
-                state1 = states[idx + 1]
-                reward = rewards[idx]
-                action = actions[idx]
-                terminal1 = terminals[idx + 1]
-                experience = Experience(state0=state0, state1=state1, reward=reward, action=action, terminal1=terminal1)
-                sequence.append(experience)
-            sequences.append(sequence)
-            assert len(sequence) == len(episode) - 1
+            sequences.append(episode)
         assert len(sequences) == batch_size
         return sequences
 
-    def append(self, observation, action, reward, terminal, training=True):
-        super(EpisodicMemoryAcer, self).append(observation, action, reward, terminal, training=training)
-
+    def append(self, observation, action, reward, policy, terminal, training=True):
         # This needs to be understood as follows: in `observation`, take `action`, obtain `reward`
         # and weather the next state is `terminal` or not.
         if training:
-            timestep = EpisodicTimestep(observation=observation, action=action, reward=reward, terminal=terminal)
+            timestep = EpisodicTimestepAcer(observation=observation, action=action,
+                                            reward=reward, policy=policy, terminal=terminal)
             if len(self.episodes) == 0:
                 self.episodes.append([])  # first episode
             self.episodes[-1].append(timestep)
-            if self.terminal:
+            if terminal:
                 self.episodes.append([])
-            self.terminal = terminal
+
 
     @property
     def nb_entries(self):
@@ -493,7 +460,7 @@ if __name__ == '__main__':
     # sample
     x = mem.sample()
 
-    # 2) test EpisodicMemory
+    # 3) test EpisodicMemory
     mem = EpisodicMemory(limit=10)
 
     # insert
@@ -514,3 +481,32 @@ if __name__ == '__main__':
     # sample
     x = mem.sample(2)
     x = mem.sample(batch_size=1, batch_idxs=[mem.nb_entries-1])
+
+    # 4) test EpisodicMemoryAcer
+    mem = EpisodicMemoryAcer(limit=10)
+
+    # insert
+    for e in range(5):
+        d = False
+        for r in range(10):
+            obs = {}
+            for k, v in observation_shape.items():
+                obs[k] = np.random.uniform(size=v)
+
+            action = {}
+            for k, v in action_shape.items():
+                action[k] = np.random.uniform(size=v)
+
+            d = True if r is 9 else False
+            mem.append(obs, action, e, action, terminal=d, training=True)
+            print(r, end=',')
+        print('')
+
+    # sample
+    for i in range(5):
+        x = mem.sample(batch_size=1, batch_idxs=[i])
+        print(len(x[0]))
+
+    x = mem.sample(batch_size=1, batch_idxs=[0])[0]
+    x[-2]
+    e = mem.sample(2)

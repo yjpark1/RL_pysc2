@@ -1,6 +1,8 @@
 import torch
 import shutil
 import copy
+import numpy as np
+from pysc2.lib import actions
 from torch.nn.functional import gumbel_softmax
 from utils import arglist
 from agent.agent import Agent
@@ -21,6 +23,50 @@ class AcerAgent(Agent):
 
         self.memory = memory
 
+    def select_action(self, obs, valid_actions):
+        '''
+        from logit to pysc2 actions
+        :param logits: {'categorical': [], 'screen1': [], 'screen2': []}
+        :return: FunctionCall form of action
+        '''
+        obs_torch = {'categorical': 0, 'screen1': 0, 'screen2': 0}
+        for o in obs:
+            x = obs[o].astype('float32')
+            x = np.expand_dims(x, 0)
+            obs_torch[o] = torch.from_numpy(x).to(arglist.DEVICE)
+
+        logits = self.actor(obs_torch)
+        logits[0] = self._mask_unavailable_actions(logits['categorical'], valid_actions)
+        tau = 1.0
+        function_id = gumbel_softmax(logits['categorical'], tau=tau, hard=True)
+        function_id = function_id.argmax().item()
+
+        # select an action until it is valid.
+        is_valid_action = self._test_valid_action(function_id, valid_actions)
+        while not is_valid_action:
+            tau *= 10
+            function_id = gumbel_softmax(logits['categorical'], tau=tau, hard=True)
+            function_id = function_id.argmax().item()
+            is_valid_action = self._test_valid_action(function_id, valid_actions)
+
+        pos_screen1 = gumbel_softmax(logits['screen1'].view(1, -1), hard=True).argmax().item()
+        pos_screen2 = gumbel_softmax(logits['screen2'].view(1, -1), hard=True).argmax().item()
+
+        pos = [[int(pos_screen1 % arglist.FEAT2DSIZE), int(pos_screen1 // arglist.FEAT2DSIZE)],
+               [int(pos_screen2 % arglist.FEAT2DSIZE), int(pos_screen2 // arglist.FEAT2DSIZE)]]  # (x, y)
+
+        args = []
+        cnt = 0
+        for arg in actions.FUNCTIONS[function_id].args:
+            if arg.name in ['screen', 'screen2', 'minimap']:
+                args.append(pos[cnt])
+                cnt += 1
+            else:
+                args.append([0])
+
+        action = actions.FunctionCall(function_id, args)
+        return action, logits
+
     def process_batch(self, mode):
         """
         Transforms numpy replays to torch tensor
@@ -31,41 +77,29 @@ class AcerAgent(Agent):
         else:
             replays = self.memory.sample(arglist.ACER.BatchSize)
 
-        # initialize batch experience
-        batch = {'state0': {'minimap': [], 'screen': [], 'nonspatial': []},
-                 'action': {'categorical': [], 'screen1': [], 'screen2': []},
-                 'reward': [],
-                 'state1': {'minimap': [], 'screen': [], 'nonspatial': []},
-                 'terminal1': [],
-                 }
-        # append experience to list
-        for e in replays:
-            # state0
-            for k, v in e.state0[0].items():
-                batch['state0'][k].append(v)
-            # action
-            for k, v in e.action.items():
-                batch['action'][k].append(v)
-            # reward
-            batch['reward'].append(e.reward)
-            # state1
-            for k, v in e.state1[0].items():
-                batch['state1'][k].append(v)
-            # terminal1
-            batch['terminal1'].append(0. if e.terminal1 else 1.)
-
         # make torch tensor
-        for key in batch.keys():
-            if type(batch[key]) is dict:
-                for subkey in batch[key]:
-                    x = torch.tensor(batch[key][subkey], dtype=torch.float32)
-                    batch[key][subkey] = x.to(self.device)
-            else:
-                x = torch.tensor(batch[key], dtype=torch.float32)
-                x = torch.squeeze(x)
-                batch[key] = x.to(self.device)
+        for i, ep in enumerate(replays):
+            for step in ep:
+                for key in step.observation.keys():
+                    x = torch.as_tensor(step.observation[key], dtype=torch.float32)
+                    step.observation[key] = x.to(self.device)
 
-        return batch
+                for key in step.action.keys():
+                    x = torch.as_tensor(step.action[key], dtype=torch.float32)
+                    step.action[key] = x.to(self.device)
+
+                for key in step.policy.keys():
+                    x = torch.as_tensor(step.policy[key], dtype=torch.float32)
+                    step.policy[key] = x.to(self.device)
+
+                x = torch.as_tensor(step.reward, dtype=torch.float32)
+                step = step._replace(reward=x.to(self.device))
+
+                x = torch.as_tensor(step.terminal, dtype=torch.float32)
+                step = step._replace(terminal=x.to(self.device))
+            replays[i] = step
+
+        return replays
 
     @staticmethod
     def gumbel_softmax_hard(x):
@@ -91,14 +125,15 @@ class AcerAgent(Agent):
         ActorCritic.copy_parameters_from(self.ActorCritic)
 
         # on-policy
-        for s in episode:
+        trajectory = replays
+
+        for s in trajectory:
             if mode == 'on-policy':
                 rho = 1
             elif mode == 'off-policy':
                 rho = policies[i].detach() / old_policies[i]
             else:
                 NotImplementedError()
-            
 
         ###########
         _, _, _, next_states, _, _ = trajectory[-1]
