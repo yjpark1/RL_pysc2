@@ -91,7 +91,14 @@ class AcerAgent(Agent):
         ActorCritic.copy_parameters_from(self.ActorCritic)
 
         # on-policy
-        min(, trajectory['policy'])
+        for s in episode:
+            if mode == 'on-policy':
+                rho = 1
+            elif mode == 'off-policy':
+                rho = policies[i].detach() / old_policies[i]
+            else:
+                NotImplementedError()
+            
 
         ###########
         _, _, _, next_states, _, _ = trajectory[-1]
