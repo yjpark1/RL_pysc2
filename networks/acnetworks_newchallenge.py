@@ -61,8 +61,8 @@ class FullyConvNet(torch.nn.Module):
 
         state_h = torch.cat([m, s, n], dim=1)
         state_h = self.layer_hidden(state_h)
+        # policy
         pol_categorical = self.layer_action(state_h)
-
         # conv. output
         pol_screen1 = self.layer_screen1(state_h)
         pol_screen2 = self.layer_screen2(state_h)
@@ -73,14 +73,13 @@ class FullyConvNet(torch.nn.Module):
 
         # Q
         q_categorical = self.layer_q_action(state_h)
-
         # conv. output
         q_screen1 = self.layer_q_screen1(state_h)
         q_screen2 = self.layer_q_screen2(state_h)
 
         q = {'categorical': q_categorical,
-              'screen1': q_screen1,
-              'screen2': q_screen2}
+             'screen1': q_screen1,
+             'screen2': q_screen2}
 
         return policy, q
 
