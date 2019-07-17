@@ -510,3 +510,16 @@ if __name__ == '__main__':
     x = mem.sample(batch_size=1, batch_idxs=[0])[0]
     x[-2]
     e = mem.sample(2)
+    np.save('replays.npy', e)
+
+    import pickle
+    def save_object(obj, filename):
+        with open(filename, 'wb') as output:  # Overwrites any existing file.
+            pickle.dump(obj, output, pickle.HIGHEST_PROTOCOL)
+
+
+    # sample usage
+    save_object(mem, 'mem.pkl')
+
+    with open('mem.pkl', 'rb') as input:
+        mem_test = pickle.load(input)

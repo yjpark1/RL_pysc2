@@ -5,8 +5,12 @@ import numpy as np
 from pysc2.lib import actions
 from torch.nn.functional import gumbel_softmax
 from utils import arglist
-from agent.agent import Agent
-from networks.acnetworks_newchallenge import FullyConvNet
+try:
+    from agent.agent import Agent
+except ModuleNotFoundError:
+    from agent import Agent
+
+from networks.acnetworks_acer import FullyConvNet
 
 
 class AcerAgent(Agent):
@@ -20,6 +24,7 @@ class AcerAgent(Agent):
         self.iter = 0
         self.ActorCritic = ActorCritic.to(self.device)
         self.actor_optimizer = torch.optim.Adam(self.ActorCritic.parameters(), arglist.ACER.LEARNINGRATE)
+        self.Average_ActorCiritc = copy.deepcopy(self.ActorCritic).to(self.device)
 
         self.memory = memory
 
@@ -74,22 +79,26 @@ class AcerAgent(Agent):
         """
         if mode == 'on-policy':
             replays = self.memory.sample(batch_size=1, batch_idxs=[self.memory.nb_entries - 1])
-        else:
+        elif mode == 'off-policy':
             replays = self.memory.sample(arglist.ACER.BatchSize)
+        else:
+            NotImplementedError()
 
         # make torch tensor
+        episodes = []
         for i, ep in enumerate(replays):
-            for step in ep:
+            ep_torch = []
+            for j, step in enumerate(ep):
                 for key in step.observation.keys():
-                    x = torch.as_tensor(step.observation[key], dtype=torch.float32)
+                    x = torch.as_tensor(np.expand_dims(step.observation[key], 0), dtype=torch.float32)
                     step.observation[key] = x.to(self.device)
 
                 for key in step.action.keys():
-                    x = torch.as_tensor(step.action[key], dtype=torch.float32)
+                    x = torch.as_tensor(np.expand_dims(step.action[key], 0), dtype=torch.float32)
                     step.action[key] = x.to(self.device)
 
                 for key in step.policy.keys():
-                    x = torch.as_tensor(step.policy[key], dtype=torch.float32)
+                    x = torch.as_tensor(np.expand_dims(step.policy[key], 0), dtype=torch.float32)
                     step.policy[key] = x.to(self.device)
 
                 x = torch.as_tensor(step.reward, dtype=torch.float32)
@@ -97,9 +106,10 @@ class AcerAgent(Agent):
 
                 x = torch.as_tensor(step.terminal, dtype=torch.float32)
                 step = step._replace(terminal=x.to(self.device))
-            replays[i] = step
+                ep_torch.append(step)
+            episodes.append(ep_torch)
 
-        return replays
+        return episodes
 
     @staticmethod
     def gumbel_softmax_hard(x):
@@ -115,25 +125,69 @@ class AcerAgent(Agent):
 
         return y
 
+    def softmax(self, x):
+        if x.dim() == 2:
+            y = torch.nn.Softmax(dim=-1)(x)
+        elif x.dim() == 4:
+            shape = x.shape
+            x = x.view(-1, shape[-1] * shape[-2])
+            y = torch.nn.Softmax(dim=-1)(x)
+            y = y.view(-1, 1, shape[-1], shape[-2])
+        return y
+
     def optimize(self, mode):
         """
         Conduct a single discrete learning iteration. Analogue of Algorithm 2 in the paper.
         """
-        trajectory = self.process_batch(mode)
+        trajectories = self.process_batch(mode)
 
         ActorCritic = FullyConvNet()
-        ActorCritic.copy_parameters_from(self.ActorCritic)
+        self.hard_update(ActorCritic, self.ActorCritic)
 
         # on-policy
-        trajectory = replays
+        for ep in trajectories:
+            ep = trajectories[0]
 
-        for s in trajectory:
-            if mode == 'on-policy':
-                rho = 1
-            elif mode == 'off-policy':
-                rho = policies[i].detach() / old_policies[i]
-            else:
-                NotImplementedError()
+            Q_retrace = {'categorical': 0, 'screen1': 0, 'screen2': 0}
+            for idx, s in enumerate(reversed(ep)):
+                V = {}
+                policy, action_value = ActorCritic(s.observation)
+                # Q retrace
+                if not s.terminal:
+                    for (k, p), (_, q) in zip(policy.items(), action_value.items()):
+                        p = self.softmax(p)
+                        Q_retrace[k] = torch.sum(p * q)
+                if idx == 0:
+                    break
+
+                if mode == 'on-policy':
+                    rho = 1
+                elif mode == 'off-policy':
+                    rho = policy.detach() / s.policy
+                else:
+                    NotImplementedError()
+
+                # loop for k-1, k-2, ..., 0 step
+
+                # loop for three types of action
+                for k in Q_retrace.keys():
+                    Q_retrace[k] = s.reward + arglist.ACER.GAMMA * Q_retrace[k]
+                    p = self.softmax(policy[k])
+                    V[k] = torch.sum(p * q)
+
+                    # computing TRPO
+                    # 1) calculate g
+                    import torch
+                    # loss1 = min([c, rho]) * log prob. of policy * (Q_retrace - value function)
+                    # loss2 =
+                    # 2) calculate k
+
+
+
+
+
+
+
 
         ###########
         _, _, _, next_states, _, _ = trajectory[-1]
@@ -269,3 +323,16 @@ class AcerAgent(Agent):
         torch.save(state, filename)
         if is_best:
             shutil.copyfile(filename, 'model_best.pth.tar')
+
+
+if __name__ == '__main__':
+    import pickle
+    from utils.memory import *
+    from networks.acnetworks_acer import FullyConvNet
+
+    with open('mem.pkl', 'rb') as input:
+        mem = pickle.load(input)
+
+    net = FullyConvNet()
+    agent = AcerAgent(net, mem)
+    agent.optimize(mode='off-policy')
